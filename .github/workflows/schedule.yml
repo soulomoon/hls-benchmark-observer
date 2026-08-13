@@ -1,0 +1,49 @@
+name: Schedule upstream benchmark
+
+on:
+  schedule:
+    # Avoid the top of the hour, when scheduled Actions runs are most likely to queue.
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream HLS branch, tag, or full commit SHA
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schedule-upstream-benchmark
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    env:
+      BENCHMARK_REPOSITORY: ${{ vars.BENCHMARK_REPOSITORY || 'soulomoon/haskell-language-server' }}
+      BENCHMARK_WORKFLOW_REF: ${{ vars.BENCHMARK_WORKFLOW_REF || 'master' }}
+      GH_TOKEN: ${{ secrets.BENCHMARK_TOKEN }}
+      UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+    steps:
+      - name: Trigger exact-SHA benchmark runner
+        run: |
+          test -n "$GH_TOKEN" || {
+            echo 'BENCHMARK_TOKEN is required' >&2
+            exit 1
+          }
+          [[ "$BENCHMARK_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo 'BENCHMARK_REPOSITORY must have OWNER/REPO form' >&2
+            exit 1
+          }
+          test -n "$BENCHMARK_WORKFLOW_REF" || {
+            echo 'BENCHMARK_WORKFLOW_REF must be non-empty' >&2
+            exit 1
+          }
+          gh workflow run upstream-benchmark-observer.yml \
+            --repo "$BENCHMARK_REPOSITORY" \
+            --ref "$BENCHMARK_WORKFLOW_REF" \
+            -f "upstream_ref=$UPSTREAM_REF" \
+            -f "observer_repository=$GITHUB_REPOSITORY"

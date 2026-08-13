@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Historical performance measurements for Haskell Language Server">
+    <title>HLS Performance History</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="eyebrow">Continuous upstream measurement</div>
+      <div class="title-row">
+        <div>
+          <h1>HLS Performance History</h1>
+          <p>Exact commits. Stable workloads. Trends you can inspect.</p>
+        </div>
+        <a class="download" href="data/history.csv">Download CSV</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="overview" aria-labelledby="latest-heading">
+        <div class="latest-card">
+          <span class="label" id="latest-heading">Latest upstream</span>
+          <a id="latest-commit" class="commit" href="#">No measurements yet</a>
+          <span id="latest-time" class="muted">Waiting for the first benchmark run</span>
+        </div>
+        <div class="stat"><strong id="commit-count">0</strong><span>commits</span></div>
+        <div class="stat"><strong id="run-count">0</strong><span>matrix runs</span></div>
+        <div class="stat"><strong id="success-rate">—</strong><span>successful cases</span></div>
+      </section>
+
+      <section class="panel explorer" aria-labelledby="explorer-heading">
+        <div class="section-heading">
+          <div>
+            <span class="label">Timeline explorer</span>
+            <h2 id="explorer-heading">One workload across upstream history</h2>
+          </div>
+          <div id="point-count" class="pill">0 points</div>
+        </div>
+
+        <div class="controls" role="group" aria-label="Chart filters">
+          <label>Project
+            <select id="example-select"></select>
+          </label>
+          <label>GHC
+            <select id="ghc-select"></select>
+          </label>
+          <label>Workload
+            <select id="benchmark-select"></select>
+          </label>
+          <label>Metric
+            <select id="metric-select">
+              <option value="total_time_ms">Total time</option>
+              <option value="startup_ms">Startup</option>
+              <option value="average_response_ms">Average response</option>
+              <option value="max_residency_mb">Max residency</option>
+              <option value="allocated_mb">Allocated memory</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="chart-wrap" class="chart-wrap">
+          <svg id="chart" viewBox="0 0 960 360" role="img" aria-labelledby="chart-title chart-description">
+            <title id="chart-title">HLS benchmark history</title>
+            <desc id="chart-description">A line chart of the selected performance measurement over time.</desc>
+          </svg>
+          <div id="empty-chart" class="empty" hidden>No successful measurements match these filters.</div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="comparison-heading">
+        <div class="section-heading">
+          <div>
+            <span class="label">Latest change</span>
+            <h2 id="comparison-heading">Compared with the previous commit</h2>
+          </div>
+          <span id="comparison-commits" class="muted">Not enough history</span>
+        </div>
+        <div id="regression-cards" class="regression-grid"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="runs-heading">
+        <div class="section-heading">
+          <div>
+            <span class="label">Evidence</span>
+            <h2 id="runs-heading">Recent measurements</h2>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Commit</th>
+                <th>Value</th>
+                <th>Result</th>
+                <th>Run</th>
+              </tr>
+            </thead>
+            <tbody id="recent-runs"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Measurements are stored only after complete-matrix validation.</span>
+      <a href="data/history.json">Raw JSON</a>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
