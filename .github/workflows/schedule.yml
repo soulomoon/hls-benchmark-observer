@@ -26,9 +26,13 @@ jobs:
       BENCHMARK_REPOSITORY: ${{ vars.BENCHMARK_REPOSITORY || 'soulomoon/haskell-language-server' }}
       BENCHMARK_WORKFLOW_REF: ${{ vars.BENCHMARK_WORKFLOW_REF || 'master' }}
       GH_TOKEN: ${{ secrets.BENCHMARK_TOKEN }}
+      UPSTREAM_REPOSITORY: haskell/haskell-language-server
       UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
     steps:
-      - name: Trigger exact-SHA benchmark runner
+      - uses: actions/checkout@v6
+
+      - name: Resolve and deduplicate upstream commit
+        id: upstream
         run: |
           test -n "$GH_TOKEN" || {
             echo 'BENCHMARK_TOKEN is required' >&2
@@ -42,8 +46,36 @@ jobs:
             echo 'BENCHMARK_WORKFLOW_REF must be non-empty' >&2
             exit 1
           }
+          encoded_ref=$(jq -rn --arg ref "$UPSTREAM_REF" '$ref | @uri')
+          upstream_commit=$(gh api \
+            "repos/$UPSTREAM_REPOSITORY/commits/$encoded_ref" \
+            --jq .sha)
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Resolved upstream commit must be a full lowercase SHA' >&2
+            exit 1
+          }
+          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+
+          jq -e \
+            --arg repository "$UPSTREAM_REPOSITORY" \
+            --arg commit "$upstream_commit" \
+            'any(.measurements[];
+              .upstream.repository == $repository
+              and .upstream.commit == $commit)' \
+            data/history.json >/dev/null && {
+              echo "already_recorded=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Skipping already-recorded upstream commit $upstream_commit"
+              exit 0
+            }
+          echo "already_recorded=false" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger exact-SHA benchmark runner
+        if: steps.upstream.outputs.already_recorded != 'true'
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
           gh workflow run upstream-benchmark-observer.yml \
             --repo "$BENCHMARK_REPOSITORY" \
             --ref "$BENCHMARK_WORKFLOW_REF" \
-            -f "upstream_ref=$UPSTREAM_REF" \
+            -f "upstream_ref=$UPSTREAM_COMMIT" \
             -f "observer_repository=$GITHUB_REPOSITORY"

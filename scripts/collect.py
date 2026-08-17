@@ -248,6 +248,46 @@ def measurement_id(document: dict[str, Any]) -> str:
     )
 
 
+def commit_identity(document: dict[str, Any]) -> tuple[str, str]:
+    upstream = document["upstream"]
+    return upstream["repository"], upstream["commit"]
+
+
+def workflow_run_identity(document: dict[str, Any]) -> tuple[str, int, int]:
+    workflow = document["workflow"]
+    return workflow["repository"], workflow["run_id"], workflow["run_attempt"]
+
+
+def deduplicate_measurements_by_commit(
+    measurements: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the earliest complete workflow run recorded for each upstream commit."""
+    runs_by_commit: dict[
+        tuple[str, str], dict[tuple[str, int, int], list[dict[str, Any]]]
+    ] = {}
+    try:
+        for measurement in measurements:
+            runs_by_commit.setdefault(commit_identity(measurement), {}).setdefault(
+                workflow_run_identity(measurement), []
+            ).append(measurement)
+    except (KeyError, TypeError) as error:
+        raise CollectionError("history measurement is missing commit or workflow identity") from error
+
+    retained: list[dict[str, Any]] = []
+    for runs in runs_by_commit.values():
+        _, selected = min(
+            runs.items(),
+            key=lambda item: (
+                min(record["measurement"]["timestamp"] for record in item[1]),
+                item[0],
+            ),
+        )
+        retained.extend(selected)
+
+    retained.sort(key=lambda item: (item["measurement"]["timestamp"], item["id"]))
+    return retained, len(measurements) - len(retained)
+
+
 def read_history(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"schema_version": 1, "generated_at": None, "measurements": []}
@@ -347,20 +387,26 @@ def collect(
         raise CollectionError("download contains duplicate GHC/example matrix coordinates")
 
     history = read_history(history_json)
-    existing = {measurement["id"]: measurement for measurement in history["measurements"]}
-    additions = 0
-    for document, identity in zip(incoming, incoming_ids, strict=True):
-        record = copy.deepcopy(document)
-        record["id"] = identity
-        if identity in existing:
-            if existing[identity] != record:
-                raise CollectionError(f"history identity {identity!r} has conflicting content")
-            continue
-        history["measurements"].append(record)
-        existing[identity] = record
-        additions += 1
+    history["measurements"], removed_duplicates = deduplicate_measurements_by_commit(
+        history["measurements"]
+    )
+    existing_commits = {
+        commit_identity(measurement) for measurement in history["measurements"]
+    }
+    incoming_commits = {commit_identity(document) for document in incoming}
+    if len(incoming_commits) != 1:
+        raise CollectionError("download contains multiple upstream commits")
 
-    if additions:
+    additions = 0
+    incoming_commit = next(iter(incoming_commits))
+    if incoming_commit not in existing_commits:
+        for document, identity in zip(incoming, incoming_ids, strict=True):
+            record = copy.deepcopy(document)
+            record["id"] = identity
+            history["measurements"].append(record)
+            additions += 1
+
+    if additions or removed_duplicates:
         history["measurements"].sort(
             key=lambda item: (item["measurement"]["timestamp"], item["id"])
         )

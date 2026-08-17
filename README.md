@@ -22,7 +22,9 @@ The scheduler only starts a measurement. Completion is signalled by Repo B, so c
 5. Enable GitHub Pages with **GitHub Actions** as the source.
 6. Run **Schedule upstream benchmark** manually once. Daily runs start at `18:17 UTC`; the non-zero minute avoids GitHub's busiest scheduling boundary.
 
-Both cross-repository tokens are deliberately narrow. The observer rejects dispatches from any repository other than `BENCHMARK_REPOSITORY`, requires a successful runner workflow, checks the full SHA against every artifact, requires the complete matrix, and deduplicates by workflow run attempt plus artifact name.
+Both cross-repository tokens are deliberately narrow. The observer rejects dispatches from any repository other than `BENCHMARK_REPOSITORY`, requires a successful runner workflow, checks the full SHA against every artifact, and requires the complete matrix. History identity is the exact upstream repository plus commit: the first complete matrix recorded for a commit wins, later runs of that commit are ignored, and the scheduler skips them before dispatch whenever possible.
+
+The dashboard includes an **All workloads (total)** workload. Its total-time value is the sum of every recorded workload for the selected project and GHC; pass coverage remains visible so a functional benchmark failure is not mistaken for a complete green run.
 
 ## Local checks
 

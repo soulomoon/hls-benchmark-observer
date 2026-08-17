@@ -156,6 +156,14 @@ h2 {
   margin: 26px 0 10px;
 }
 
+.control-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0 0 12px;
+}
+
+.control-note strong { color: var(--text); }
+
 label {
   color: var(--muted);
   font-size: 0.75rem;
@@ -189,6 +197,8 @@ select {
 .chart-area { fill: url(#area-gradient); }
 .chart-point { fill: var(--bg); stroke: var(--accent); stroke-width: 3; }
 .chart-point:hover { fill: var(--accent); }
+.chart-point-partial { stroke: var(--warning); }
+.chart-point-partial:hover { fill: var(--warning); }
 
 .empty {
   position: absolute;
@@ -234,6 +244,7 @@ th { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-
 td code { color: var(--blue); }
 .result-good { color: var(--accent); }
 .result-bad { color: var(--danger); }
+.result-warn { color: var(--warning); }
 
 footer {
   display: flex;

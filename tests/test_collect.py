@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -18,24 +19,32 @@ UPSTREAM_REPOSITORY = "haskell/haskell-language-server"
 UPSTREAM_COMMIT = "a" * 40
 
 
-def manifest(artifact: str, ghc: str, example: str) -> dict:
+def manifest(
+    artifact: str,
+    ghc: str,
+    example: str,
+    *,
+    run_id: int = 123,
+    upstream_commit: str = UPSTREAM_COMMIT,
+    timestamp: str = "2026-08-13T04:00:00Z",
+) -> dict:
     return {
         "schema_version": 1,
         "upstream": {
             "repository": UPSTREAM_REPOSITORY,
             "ref": "master",
-            "commit": UPSTREAM_COMMIT,
-            "commit_url": f"https://github.com/{UPSTREAM_REPOSITORY}/commit/{UPSTREAM_COMMIT}",
+            "commit": upstream_commit,
+            "commit_url": f"https://github.com/{UPSTREAM_REPOSITORY}/commit/{upstream_commit}",
         },
         "workflow": {
             "repository": BENCHMARK_REPOSITORY,
-            "run_id": 123,
+            "run_id": run_id,
             "run_attempt": 1,
-            "run_url": f"https://github.com/{BENCHMARK_REPOSITORY}/actions/runs/123",
+            "run_url": f"https://github.com/{BENCHMARK_REPOSITORY}/actions/runs/{run_id}",
             "artifact_name": artifact,
         },
         "measurement": {
-            "timestamp": "2026-08-13T04:00:00Z",
+            "timestamp": timestamp,
             "ghc": ghc,
             "example": example,
             "runner": {
@@ -84,22 +93,49 @@ class CollectTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def write_manifest(self, artifact: str, ghc: str, example: str) -> Path:
+    def write_manifest(
+        self,
+        artifact: str,
+        ghc: str,
+        example: str,
+        *,
+        run_id: int = 123,
+        upstream_commit: str = UPSTREAM_COMMIT,
+        timestamp: str = "2026-08-13T04:00:00Z",
+    ) -> Path:
         target = self.incoming / artifact / "benchmark.json"
-        target.parent.mkdir(parents=True)
-        target.write_text(json.dumps(manifest(artifact, ghc, example)), encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                manifest(
+                    artifact,
+                    ghc,
+                    example,
+                    run_id=run_id,
+                    upstream_commit=upstream_commit,
+                    timestamp=timestamp,
+                )
+            ),
+            encoding="utf-8",
+        )
         return target
 
-    def run_collect(self, expected_artifacts: int = 2) -> tuple[int, int]:
+    def run_collect(
+        self,
+        expected_artifacts: int = 2,
+        *,
+        run_id: int = 123,
+        upstream_commit: str = UPSTREAM_COMMIT,
+    ) -> tuple[int, int]:
         return collect(
             self.incoming,
             self.history_json,
             self.history_csv,
             expected_repository=BENCHMARK_REPOSITORY,
-            expected_run_id=123,
+            expected_run_id=run_id,
             expected_run_attempt=1,
             expected_upstream_repository=UPSTREAM_REPOSITORY,
-            expected_upstream_commit=UPSTREAM_COMMIT,
+            expected_upstream_commit=upstream_commit,
             expected_artifacts=expected_artifacts,
         )
 
@@ -113,6 +149,94 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(self.run_collect(), (0, 2))
         self.assertEqual(self.history_json.read_bytes(), original_json)
         self.assertEqual(self.history_csv.read_bytes(), original_csv)
+        self.assertEqual(len(self.history_csv.read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_ignores_a_new_run_for_an_existing_upstream_commit(self) -> None:
+        artifacts = [
+            ("observer-benchmark-cabal-ghc-9.14", "9.14", "cabal"),
+            ("observer-benchmark-lsp-types-ghc-9.14", "9.14", "lsp-types"),
+        ]
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(artifact, ghc, example)
+        self.assertEqual(self.run_collect(), (2, 2))
+        original_json = self.history_json.read_bytes()
+        original_csv = self.history_csv.read_bytes()
+
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(
+                artifact,
+                ghc,
+                example,
+                run_id=456,
+                timestamp="2026-08-14T04:00:00Z",
+            )
+        self.assertEqual(self.run_collect(run_id=456), (0, 2))
+        self.assertEqual(self.history_json.read_bytes(), original_json)
+        self.assertEqual(self.history_csv.read_bytes(), original_csv)
+
+    def test_appends_a_different_upstream_commit(self) -> None:
+        artifacts = [
+            ("observer-benchmark-cabal-ghc-9.14", "9.14", "cabal"),
+            ("observer-benchmark-lsp-types-ghc-9.14", "9.14", "lsp-types"),
+        ]
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(artifact, ghc, example)
+        self.assertEqual(self.run_collect(), (2, 2))
+
+        next_commit = "b" * 40
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(
+                artifact,
+                ghc,
+                example,
+                run_id=456,
+                upstream_commit=next_commit,
+                timestamp="2026-08-14T04:00:00Z",
+            )
+        self.assertEqual(
+            self.run_collect(run_id=456, upstream_commit=next_commit),
+            (2, 4),
+        )
+
+    def test_migrates_duplicate_commit_runs_to_the_earliest_run(self) -> None:
+        artifacts = [
+            ("observer-benchmark-cabal-ghc-9.14", "9.14", "cabal"),
+            ("observer-benchmark-lsp-types-ghc-9.14", "9.14", "lsp-types"),
+        ]
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(artifact, ghc, example)
+        self.assertEqual(self.run_collect(), (2, 2))
+
+        history = json.loads(self.history_json.read_text(encoding="utf-8"))
+        duplicates = []
+        for record in history["measurements"]:
+            duplicate = copy.deepcopy(record)
+            duplicate["workflow"]["run_id"] = 456
+            duplicate["workflow"]["run_url"] = (
+                f"https://github.com/{BENCHMARK_REPOSITORY}/actions/runs/456"
+            )
+            duplicate["measurement"]["timestamp"] = "2026-08-14T04:00:00Z"
+            duplicate["id"] = ":".join(
+                [BENCHMARK_REPOSITORY, "456", "1", duplicate["workflow"]["artifact_name"]]
+            )
+            duplicates.append(duplicate)
+        history["measurements"].extend(duplicates)
+        self.history_json.write_text(json.dumps(history), encoding="utf-8")
+
+        for artifact, ghc, example in artifacts:
+            self.write_manifest(
+                artifact,
+                ghc,
+                example,
+                run_id=789,
+                timestamp="2026-08-15T04:00:00Z",
+            )
+        self.assertEqual(self.run_collect(run_id=789), (0, 2))
+        migrated = json.loads(self.history_json.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {record["workflow"]["run_id"] for record in migrated["measurements"]},
+            {123},
+        )
         self.assertEqual(len(self.history_csv.read_text(encoding="utf-8").splitlines()), 3)
 
     def test_rejects_incomplete_artifact_set(self) -> None:

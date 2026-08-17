@@ -1,4 +1,5 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
+const TOTAL_WORKLOAD = "All workloads (total)";
 
 const metricMetadata = {
   total_time_ms: { label: "Total time", unit: "ms" },
@@ -32,17 +33,43 @@ function unique(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
 
+function aggregateWorkloads(results) {
+  const samples = results.reduce((total, result) => total + result.samples, 0);
+  const successfulCases = results.filter((result) => result.success).length;
+  return {
+    benchmark: TOTAL_WORKLOAD,
+    success: successfulCases === results.length,
+    successfulCases,
+    totalCases: results.length,
+    samples,
+    startup_ms: results.reduce((total, result) => total + result.startup_ms, 0),
+    average_response_ms: samples === 0 ? 0 : results.reduce(
+      (total, result) => total + result.average_response_ms * result.samples,
+      0,
+    ) / samples,
+    total_time_ms: results.reduce((total, result) => total + result.total_time_ms, 0),
+    max_residency_mb: Math.max(...results.map((result) => result.max_residency_mb)),
+    allocated_mb: results.reduce((total, result) => total + result.allocated_mb, 0),
+    isAggregate: true,
+  };
+}
+
 function flatten(history) {
-  return history.measurements.flatMap((entry) => entry.results.map((result) => ({
-    ...result,
-    id: entry.id,
-    measuredAt: entry.measurement.timestamp,
-    ghc: entry.measurement.ghc,
-    example: entry.measurement.example,
-    commit: entry.upstream.commit,
-    commitUrl: entry.upstream.commit_url,
-    runUrl: entry.workflow.run_url,
-  })));
+  return history.measurements.flatMap((entry) => {
+    const context = {
+      id: entry.id,
+      measuredAt: entry.measurement.timestamp,
+      ghc: entry.measurement.ghc,
+      example: entry.measurement.example,
+      commit: entry.upstream.commit,
+      commitUrl: entry.upstream.commit_url,
+      runUrl: entry.workflow.run_url,
+    };
+    return [
+      { ...aggregateWorkloads(entry.results), ...context },
+      ...entry.results.map((result) => ({ ...result, ...context, isAggregate: false })),
+    ];
+  });
 }
 
 function setOptions(select, values) {
@@ -109,7 +136,9 @@ function svgNode(name, attributes = {}, text = "") {
 
 function drawChart(selected) {
   const field = elements.metric.value;
-  const points = selected.filter((row) => row.success && Number.isFinite(row[field]));
+  const points = selected.filter(
+    (row) => (row.success || row.isAggregate) && Number.isFinite(row[field]),
+  );
   elements.pointCount.textContent = `${points.length} point${points.length === 1 ? "" : "s"}`;
   elements.chart.replaceChildren();
   elements.chart.hidden = points.length === 0;
@@ -169,8 +198,21 @@ function drawChart(selected) {
   });
 
   points.forEach((point, index) => {
-    const circle = svgNode("circle", { cx: x(index), cy: y(point[field]), r: 5, class: "chart-point" });
-    circle.append(svgNode("title", {}, `${shortSha(point.commit)} · ${formatMetric(point[field], field)} · ${formatDate(point.measuredAt)}`));
+    const partial = point.isAggregate && !point.success;
+    const circle = svgNode("circle", {
+      cx: x(index),
+      cy: y(point[field]),
+      r: 5,
+      class: `chart-point${partial ? " chart-point-partial" : ""}`,
+    });
+    const coverage = point.isAggregate
+      ? ` · ${point.successfulCases}/${point.totalCases} workloads passed`
+      : "";
+    circle.append(svgNode(
+      "title",
+      {},
+      `${shortSha(point.commit)} · ${formatMetric(point[field], field)} · ${formatDate(point.measuredAt)}${coverage}`,
+    ));
     elements.chart.append(circle);
   });
 }
@@ -182,7 +224,9 @@ function latestDistinctCommits(selected) {
 }
 
 function renderRegressions(selected) {
-  const [latest, previous] = latestDistinctCommits(selected.filter((row) => row.success));
+  const [latest, previous] = latestDistinctCommits(
+    selected.filter((row) => row.success || row.isAggregate),
+  );
   elements.regressionCards.replaceChildren();
   if (!latest || !previous) {
     elements.comparisonCommits.textContent = "Not enough distinct commits";
@@ -199,7 +243,11 @@ function renderRegressions(selected) {
     return;
   }
 
-  elements.comparisonCommits.textContent = `${shortSha(latest.commit)} vs ${shortSha(previous.commit)}`;
+  const partial = [latest, previous].some((row) => row.isAggregate && !row.success);
+  elements.comparisonCommits.textContent = (
+    `${shortSha(latest.commit)} vs ${shortSha(previous.commit)}`
+    + `${partial ? " · partial pass coverage" : ""}`
+  );
   [
     ["startup_ms", "Startup"],
     ["total_time_ms", "Total time"],
@@ -237,8 +285,13 @@ function renderTable(selected) {
     const value = document.createElement("td");
     value.textContent = formatMetric(row[field], field);
     const result = document.createElement("td");
-    result.className = row.success ? "result-good" : "result-bad";
-    result.textContent = row.success ? "Passed" : "Failed";
+    if (row.isAggregate) {
+      result.className = row.success ? "result-good" : "result-warn";
+      result.textContent = `${row.successfulCases}/${row.totalCases} passed`;
+    } else {
+      result.className = row.success ? "result-good" : "result-bad";
+      result.textContent = row.success ? "Passed" : "Failed";
+    }
     const run = document.createElement("td");
     const runLink = document.createElement("a");
     runLink.href = row.runUrl;
@@ -267,7 +320,11 @@ function renderOverview(history) {
     elements.latestTime.textContent = `${formatDate(latest.measurement.timestamp)} · ${latest.upstream.ref}`;
   }
   elements.commitCount.textContent = new Set(measurements.map((item) => item.upstream.commit)).size;
-  elements.runCount.textContent = measurements.length;
+  elements.runCount.textContent = new Set(measurements.map((item) => [
+    item.workflow.repository,
+    item.workflow.run_id,
+    item.workflow.run_attempt,
+  ].join(":"))).size;
   const cases = measurements.flatMap((item) => item.results);
   const successes = cases.filter((item) => item.success).length;
   elements.successRate.textContent = cases.length ? `${(successes / cases.length * 100).toFixed(1)}%` : "—";
