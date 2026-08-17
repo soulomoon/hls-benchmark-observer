@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from collect import CollectionError, collect  # noqa: E402
 
 
-BENCHMARK_REPOSITORY = "soulomoon/haskell-language-server"
+BENCHMARK_REPOSITORY = "soulomoon/hls-benchmark-observer"
 UPSTREAM_REPOSITORY = "haskell/haskell-language-server"
 UPSTREAM_COMMIT = "a" * 40
 

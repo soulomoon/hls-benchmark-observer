@@ -1,0 +1,322 @@
+name: Upstream Benchmark Observer
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  schedule:
+    # Avoid the top of the hour, when scheduled Actions runs are most likely to queue.
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream HLS branch, tag, or full commit SHA to measure
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-benchmark-observer
+  cancel-in-progress: false
+
+env:
+  EXPECTED_ARTIFACTS: '4'
+  OBSERVER_BRANCH: ${{ github.event.repository.default_branch }}
+  UPSTREAM_REPOSITORY: haskell/haskell-language-server
+
+jobs:
+  resolve:
+    name: Resolve and deduplicate upstream commit
+    runs-on: ubuntu-latest
+    outputs:
+      already_recorded: ${{ steps.upstream.outputs.already_recorded }}
+      commit: ${{ steps.upstream.outputs.commit }}
+      ref: ${{ steps.upstream.outputs.ref }}
+    steps:
+      - name: Check out observer history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.OBSERVER_BRANCH }}
+          path: .observer
+          persist-credentials: false
+
+      - name: Check out requested upstream ref
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ inputs.upstream_ref || 'master' }}
+          fetch-depth: 1
+          path: .upstream
+          persist-credentials: false
+
+      - name: Resolve exact commit and check history
+        id: upstream
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+        run: |
+          upstream_commit=$(git -C .upstream rev-parse HEAD)
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Resolved upstream commit must be a full lowercase SHA' >&2
+            exit 1
+          }
+          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+          echo "ref=$UPSTREAM_REF" >> "$GITHUB_OUTPUT"
+
+          if jq -e \
+            --arg repository "$UPSTREAM_REPOSITORY" \
+            --arg commit "$upstream_commit" \
+            'any(.measurements[];
+              .upstream.repository == $repository
+              and .upstream.commit == $commit)' \
+            .observer/data/history.json >/dev/null
+          then
+            echo 'already_recorded=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping already-recorded upstream commit $upstream_commit"
+          else
+            echo 'already_recorded=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  bench_init:
+    name: Prepare GHC ${{ matrix.ghc }} benchmark workspace
+    needs: resolve
+    if: needs.resolve.outputs.already_recorded == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ['9.12', '9.14']
+    steps:
+      - name: Check out exact upstream commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          ghc: ${{ matrix.ghc }}
+          os: ${{ runner.os }}
+          shorten-hls: 'false'
+
+      - name: Check out observer tooling
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .observer-harness
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Create exact-SHA observer config
+        run: >-
+          python3 .observer-harness/scripts/make_config.py
+          bench/config.yaml bench/observer-config.yaml
+
+      - name: Build benchmark driver
+        run: |
+          cabal configure --enable-benchmarks --max-backjumps 12000
+          cabal build haskell-language-server:benchmark
+
+      - name: Build measured HLS binary
+        run: >-
+          cabal bench -j
+          --benchmark-options="--config bench/observer-config.yaml all-binaries"
+
+      - name: Package workspace
+        run: tar -czf workspace.tar.gz * .git
+
+      - name: Package Cabal home
+        run: |
+          cd ~/.cabal
+          tar -czf cabal.tar.gz *
+
+      - name: Upload workspace
+        uses: actions/upload-artifact@v7
+        with:
+          name: observer-workspace-${{ matrix.ghc }}
+          retention-days: 1
+          path: workspace.tar.gz
+
+      - name: Upload Cabal home
+        uses: actions/upload-artifact@v7
+        with:
+          name: observer-cabal-home-${{ matrix.ghc }}
+          retention-days: 1
+          path: ~/.cabal/cabal.tar.gz
+
+  benchmark:
+    name: GHC ${{ matrix.ghc }} / ${{ matrix.example }}
+    needs: [resolve, bench_init]
+    if: needs.resolve.outputs.already_recorded == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ['9.12', '9.14']
+        cabal: ['3.16']
+        example: [cabal, lsp-types]
+    steps:
+      - uses: haskell-actions/setup@v2.11
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: ${{ matrix.cabal }}
+          enable-stack: false
+
+      - name: Download Cabal home
+        uses: actions/download-artifact@v8
+        with:
+          name: observer-cabal-home-${{ matrix.ghc }}
+          path: .
+
+      - name: Download workspace
+        uses: actions/download-artifact@v8
+        with:
+          name: observer-workspace-${{ matrix.ghc }}
+          path: .
+
+      - name: Restore workspace
+        run: |
+          mkdir -p ~/.cabal
+          tar xzf workspace.tar.gz
+          tar xzf cabal.tar.gz --directory ~/.cabal
+
+      - name: Check out observer tooling
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .observer-harness
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Run benchmark
+        run: >-
+          cabal bench -j
+          --benchmark-options="--config bench/observer-config.yaml ${{ matrix.example }}"
+
+      - name: Export observer artifact
+        env:
+          ARTIFACT_NAME: observer-benchmark-${{ matrix.example }}-ghc-${{ matrix.ghc }}
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.commit }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.ref }}
+        run: |
+          mkdir -p observer-artifact
+          cp "bench-results/unprofiled/${{ matrix.example }}/results.csv" observer-artifact/results.csv
+          cp "bench-results/unprofiled/${{ matrix.example }}/resultDiff.csv" observer-artifact/resultDiff.csv
+          python3 .observer-harness/scripts/export_result.py \
+            --results observer-artifact/results.csv \
+            --output observer-artifact/benchmark.json \
+            --upstream-repository "$UPSTREAM_REPOSITORY" \
+            --upstream-ref "$UPSTREAM_REF" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --workflow-repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifact-name "$ARTIFACT_NAME" \
+            --ghc "${{ matrix.ghc }}" \
+            --example "${{ matrix.example }}" \
+            --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" \
+            --runner-image "${ImageOS:-unknown}" \
+            --runner-image-version "${ImageVersion:-unknown}"
+
+      - name: Upload observer result
+        uses: actions/upload-artifact@v7
+        with:
+          name: observer-benchmark-${{ matrix.example }}-ghc-${{ matrix.ghc }}
+          retention-days: 30
+          path: observer-artifact
+
+      - name: Package benchmark logs
+        if: always()
+        run: |
+          find bench-results -type f \( -name '*.log' -o -name '*.hp' \) -print0 \
+            | tar --null -T - -czf benchmark-logs.tar.gz
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: observer-logs-${{ matrix.example }}-ghc-${{ matrix.ghc }}
+          retention-days: 14
+          path: benchmark-logs.tar.gz
+
+  collect:
+    name: Validate and record benchmark history
+    needs: [resolve, bench_init, benchmark]
+    if: >-
+      needs.resolve.outputs.already_recorded == 'false'
+      && needs.benchmark.result == 'success'
+    permissions:
+      actions: write
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out observer history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.OBSERVER_BRANCH }}
+          fetch-depth: 0
+
+      - name: Download normalized benchmark artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: observer-benchmark-*
+          path: incoming
+
+      - name: Validate and append history
+        env:
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          mapfile -t artifact_attempts < <(
+            find incoming -type f -path '*/benchmark.json' \
+              -exec jq -r '.workflow.run_attempt' {} \; | sort -u
+          )
+          if (( ${#artifact_attempts[@]} != 1 )); then
+            echo 'Artifacts must describe exactly one workflow run attempt' >&2
+            exit 1
+          fi
+          artifact_run_attempt=${artifact_attempts[0]}
+          [[ "$artifact_run_attempt" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'Artifact run attempt must be a positive integer' >&2
+            exit 1
+          }
+
+          python3 scripts/collect.py \
+            --input incoming \
+            --history-json data/history.json \
+            --history-csv data/history.csv \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$artifact_run_attempt" \
+            --expected-upstream-repository "$UPSTREAM_REPOSITORY" \
+            --expected-upstream-commit "$UPSTREAM_COMMIT" \
+            --expected-artifacts "$EXPECTED_ARTIFACTS"
+
+      - name: Commit durable history
+        id: commit
+        env:
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/history.json data/history.csv
+          if git diff --cached --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Record HLS benchmark $UPSTREAM_COMMIT"
+            git push
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy updated dashboard
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref "$OBSERVER_BRANCH"
